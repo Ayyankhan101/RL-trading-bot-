@@ -37,10 +37,16 @@ class TerminalTrader:
         self.signal_history = deque(maxlen=20)
         self.running = True
         
-        # Trading parameters
-        self.rsi_oversold = 30
-        self.rsi_overbought = 70
+        # Optimized trading parameters for better win rate
+        self.rsi_oversold = 25  # More strict oversold (was 30)
+        self.rsi_overbought = 75  # More strict overbought (was 70)
         self.min_trade_amount = 100  # Minimum $100 per trade
+        
+        # Enhanced signal confirmation
+        self.trend_confirmation_periods = 3  # Require 3 periods of trend
+        self.volume_threshold = 1.2  # Require 20% above average volume
+        self.stop_loss_pct = 0.03  # 3% stop loss
+        self.take_profit_pct = 0.06  # 6% take profit (2:1 risk-reward)
         
         # Display settings
         self.refresh_rate = 5  # seconds
@@ -124,7 +130,7 @@ class TerminalTrader:
         }
     
     def generate_trading_signal(self, data, market_info):
-        """Generate trading signal based on analysis"""
+        """Enhanced trading signal with better win rate optimization"""
         if data is None or len(data) < 20:
             return "HOLD", "Insufficient data", 0
         
@@ -132,70 +138,111 @@ class TerminalTrader:
         current_price = metrics['price']
         rsi = metrics['rsi']
         price_change_24h = metrics['price_change_24h']
+        volume_ratio = metrics['volume_ratio']
         
-        # Signal scoring system
+        # Enhanced signal scoring system
         buy_score = 0
         sell_score = 0
         confidence = 0
+        reasons = []
         
-        # RSI signals
-        if rsi < 25:  # Very oversold
-            buy_score += 3
-            confidence += 30
+        # 1. STRICT RSI signals (more selective)
+        if rsi < 20:  # Extremely oversold
+            buy_score += 4
+            confidence += 40
+            reasons.append(f"Extremely oversold RSI({rsi:.1f})")
         elif rsi < self.rsi_oversold:  # Oversold
             buy_score += 2
-            confidence += 20
-        elif rsi > 75:  # Very overbought
-            sell_score += 3
-            confidence += 30
+            confidence += 25
+            reasons.append(f"Oversold RSI({rsi:.1f})")
+        elif rsi > 80:  # Extremely overbought
+            sell_score += 4
+            confidence += 40
+            reasons.append(f"Extremely overbought RSI({rsi:.1f})")
         elif rsi > self.rsi_overbought:  # Overbought
             sell_score += 2
-            confidence += 20
+            confidence += 25
+            reasons.append(f"Overbought RSI({rsi:.1f})")
         
-        # Trend signals
-        if "BULLISH_TREND" in conditions:
+        # 2. TREND CONFIRMATION (require stronger trends)
+        if "BULLISH_TREND" in conditions and price_change_24h > 2:
+            buy_score += 2
+            confidence += 20
+            reasons.append("Strong bullish trend")
+        elif "BEARISH_TREND" in conditions and price_change_24h < -2:
+            sell_score += 2
+            confidence += 20
+            reasons.append("Strong bearish trend")
+        
+        # 3. VOLUME CONFIRMATION (require significant volume)
+        if volume_ratio >= self.volume_threshold:
+            confidence += 25
+            reasons.append(f"High volume confirmation({volume_ratio:.1f}x)")
+        else:
+            confidence -= 15  # Penalize low volume
+            reasons.append("Low volume - reducing confidence")
+        
+        # 4. MOMENTUM CONFIRMATION
+        if price_change_24h < -7:  # Very strong dip
+            buy_score += 3
+            confidence += 25
+            reasons.append(f"Strong dip({price_change_24h:+.1f}%)")
+        elif price_change_24h < -3:  # Moderate dip
             buy_score += 1
             confidence += 10
-        elif "BEARISH_TREND" in conditions:
-            sell_score += 1
-            confidence += 10
-        
-        # Volume confirmation
-        if "HIGH_VOLUME" in conditions:
+        elif price_change_24h > 7:  # Very strong rally
+            sell_score += 2
             confidence += 15
+            reasons.append(f"Strong rally({price_change_24h:+.1f}%)")
         
-        # Price momentum
-        if price_change_24h < -5:  # Strong dip
-            buy_score += 2
-            confidence += 15
-        elif price_change_24h > 5:  # Strong rally
-            sell_score += 1
-            confidence += 10
+        # 5. MULTI-TIMEFRAME CONFIRMATION
+        if len(data) >= 24:
+            # Check if trend is consistent over multiple periods
+            recent_prices = data['close'].tail(self.trend_confirmation_periods)
+            if len(recent_prices) >= 3:
+                trend_up = all(recent_prices.iloc[i] > recent_prices.iloc[i-1] for i in range(1, len(recent_prices)))
+                trend_down = all(recent_prices.iloc[i] < recent_prices.iloc[i-1] for i in range(1, len(recent_prices)))
+                
+                if trend_up and buy_score > 0:
+                    buy_score += 1
+                    confidence += 15
+                    reasons.append("Consistent uptrend")
+                elif trend_down and sell_score > 0:
+                    sell_score += 1
+                    confidence += 15
+                    reasons.append("Consistent downtrend")
         
-        # Generate signal
-        if buy_score > sell_score and buy_score >= 2:
+        # 6. VOLATILITY FILTER (avoid trading in high volatility)
+        volatility = metrics.get('volatility', 0)
+        if volatility > 8:  # High volatility
+            confidence -= 20
+            reasons.append("High volatility - reducing confidence")
+        
+        # 7. GENERATE SIGNAL WITH HIGHER THRESHOLDS
+        confidence = max(0, min(confidence, 100))
+        
+        if buy_score >= 4 and buy_score > sell_score:  # Require higher score
             signal = "BUY"
-            reason = f"Buy signal: RSI={rsi:.1f}, 24h change={price_change_24h:+.2f}%"
-        elif sell_score > buy_score and sell_score >= 2:
+            reason = "BUY: " + ", ".join(reasons[:3])
+        elif sell_score >= 4 and sell_score > buy_score:  # Require higher score
             signal = "SELL"
-            reason = f"Sell signal: RSI={rsi:.1f}, 24h change={price_change_24h:+.2f}%"
+            reason = "SELL: " + ", ".join(reasons[:3])
         else:
             signal = "HOLD"
-            reason = f"Hold: Mixed signals, RSI={rsi:.1f}"
+            reason = f"HOLD: Insufficient signals (buy:{buy_score}, sell:{sell_score})"
         
-        confidence = min(confidence, 100)
         return signal, reason, confidence
     
     def execute_trade(self, signal, price, confidence):
-        """Execute trade based on signal"""
-        if confidence < 60:  # Only trade with high confidence
-            return False, "Low confidence signal"
+        """Enhanced trade execution with better risk management"""
+        if confidence < 70:  # Require higher confidence (was 60)
+            return False, f"Low confidence signal ({confidence:.0f}% < 70%)"
         
         current_value = self.get_portfolio_value(price)
         
         if signal == "BUY" and self.balance > self.min_trade_amount:
-            # Buy with 25% of available balance
-            trade_amount = min(self.balance * 0.25, self.balance - 50)  # Keep $50 buffer
+            # More conservative position sizing (15% instead of 25%)
+            trade_amount = min(self.balance * 0.15, self.balance - 100)  # Keep $100 buffer
             btc_amount = trade_amount / price
             
             self.balance -= trade_amount
@@ -207,14 +254,16 @@ class TerminalTrader:
                 'price': price,
                 'amount': btc_amount,
                 'value': trade_amount,
-                'confidence': confidence
+                'confidence': confidence,
+                'stop_loss': price * (1 - self.stop_loss_pct),
+                'take_profit': price * (1 + self.take_profit_pct)
             }
             self.trades.append(trade)
-            return True, f"Bought {btc_amount:.6f} BTC for ${trade_amount:.2f}"
+            return True, f"Bought {btc_amount:.6f} BTC for ${trade_amount:.2f} (SL: ${trade['stop_loss']:.0f}, TP: ${trade['take_profit']:.0f})"
         
         elif signal == "SELL" and self.btc_held > 0:
-            # Sell 50% of holdings
-            btc_to_sell = self.btc_held * 0.5
+            # More conservative exit (30% instead of 50%)
+            btc_to_sell = self.btc_held * 0.3
             trade_value = btc_to_sell * price
             
             self.balance += trade_value
