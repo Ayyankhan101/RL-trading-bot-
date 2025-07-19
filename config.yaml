@@ -1,0 +1,89 @@
+# Configuration file for RL Trading Bot
+
+# Trading Parameters
+trading:
+  initial_balance: 10000
+  transaction_cost: 0.001  # 0.1% per trade
+  max_position_size: 0.95  # Maximum 95% of portfolio
+  min_position_size: 0.01  # Minimum 1% of portfolio
+  lookback_days: 252       # 1 year of trading days
+  rebalance_frequency: 1   # Daily rebalancing
+
+# Model Configuration
+model:
+  architecture: "DQN"      # DQN, DDQN, or DuelingDQN
+  learning_rate: 0.0001
+  batch_size: 32
+  memory_size: 10000
+  epsilon_start: 1.0
+  epsilon_end: 0.01
+  epsilon_decay: 0.995
+  target_update_frequency: 100
+  gamma: 0.95              # Discount factor
+  
+# Neural Network Architecture
+network:
+  hidden_layers: [256, 128, 64]
+  activation: "relu"
+  dropout_rate: 0.2
+  use_lstm: true
+  lstm_units: 50
+  use_attention: true
+
+# Feature Engineering
+features:
+  lookback_window: 60      # Number of previous time steps
+  technical_indicators:
+    - RSI
+    - MACD
+    - BB          # Bollinger Bands
+    - SMA_10
+    - SMA_20
+    - SMA_50
+    - EMA_12
+    - EMA_26
+    - STOCH       # Stochastic Oscillator
+    - ATR         # Average True Range
+  include_sentiment: true  # Fear & Greed Index
+  include_volume: true
+  normalize_features: true
+
+# Training Configuration
+training:
+  episodes: 1000
+  max_steps_per_episode: 1000
+  validation_split: 0.2
+  early_stopping_patience: 50
+  save_best_model: true
+  log_frequency: 10
+
+# Backtesting
+backtesting:
+  start_date: "2020-01-01"
+  end_date: "2024-01-01"
+  benchmark: "BTC"         # Buy and hold Bitcoin
+  commission: 0.001
+  slippage: 0.0005
+
+# Risk Management
+risk:
+  max_drawdown_threshold: 0.20  # Stop trading if drawdown > 20%
+  var_confidence: 0.05          # 95% VaR
+  kelly_fraction: 0.25          # Kelly Criterion multiplier
+  stop_loss: 0.05               # 5% stop loss
+  take_profit: 0.15             # 15% take profit
+
+# Data Sources
+data:
+  primary_source: "yfinance"
+  symbols: ["BTC-USD"]
+  timeframe: "1d"           # Daily data
+  update_frequency: "daily"
+
+# Dashboard Configuration
+dashboard:
+  port: 8501
+  theme: "dark"
+  refresh_interval: 30      # seconds
+  show_live_trades: true
+  show_performance_metrics: true
