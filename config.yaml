@@ -1,89 +1,293 @@
-# Configuration file for RL Trading Bot
+# Configuration for the Bitcoin RL Trading Bot.
+# Every key below is read by code. Nothing here is aspirational.
 
-# Trading Parameters
+# Execution
+#
+# The measured mean-reversion edge is 0.01%-0.08% per trade. A taker round trip
+# costs ~0.30%, which is 4x-30x the edge - the strategy cannot pay for itself
+# crossing the spread. Maker (limit) fills cost ~0.06%, but only fill when the
+# market trades through them, so the cheaper fee is paid for in missed trades.
+# Both effects are modeled in environment/execution.py; the miss rate is
+# reported in results and asserted non-zero by the tests.
+execution:
+  mode: "cfd"               # taker | maker | cfd
+  maker_fee: 0.0002         # 0.02%
+  taker_fee: 0.001          # 0.10%
+  slippage: 0.0005          # taker only; a resting limit fills at its own price
+  limit_offset: 0.0005      # post 0.05% on the passive side
+  max_wait_bars: 4          # cancel an unfilled limit after an hour at 15m
+  fallback_to_taker: false  # miss the trade rather than pay the spread
+
+  # CFD settings, used when mode is "cfd" (gold on a broker like Exness).
+  # A gold spread is quoted in dollars per ounce and does NOT scale with
+  # notional, unlike a crypto percentage fee - which is exactly why gold is
+  # viable at 15m where BTC is not.
+  spread_points: 0.15       # XAUUSD spread in price units ($/oz)
+  commission_per_lot: 7.0   # round turn per standard lot
+  contract_size: 100.0      # ounces per standard lot
+  # Swap-free (Islamic) account: no overnight financing. This genuinely helps -
+  # it makes the multi-day holding horizon, where gold's edge actually lives,
+  # free to carry.
+  swap_long_daily: 0.0
+  swap_short_daily: 0.0
+
+# Trading / execution
 trading:
   initial_balance: 10000
-  transaction_cost: 0.001  # 0.1% per trade
-  max_position_size: 0.95  # Maximum 95% of portfolio
-  min_position_size: 0.01  # Minimum 1% of portfolio
-  lookback_days: 252       # 1 year of trading days
-  rebalance_frequency: 1   # Daily rebalancing
+  transaction_cost: 0.001   # 0.1% per fill, charged on both legs
+  max_position_size: 0.95   # target exposure when long
+  min_position_size: 0.02   # reject orders smaller than 2% of equity (no dust churn)
 
-# Model Configuration
+# Agent
 model:
-  architecture: "DQN"      # DQN, DDQN, or DuelingDQN
-  learning_rate: 0.0001
-  batch_size: 32
-  memory_size: 10000
+  variant: "double"         # dqn | double | dueling
+  learning_rate: 0.0005
+  batch_size: 64
+  memory_size: 50000
   epsilon_start: 1.0
-  epsilon_end: 0.01
-  epsilon_decay: 0.995
-  target_update_frequency: 100
-  gamma: 0.95              # Discount factor
-  
-# Neural Network Architecture
+  epsilon_end: 0.05
+  epsilon_decay: 0.92       # applied once per EPISODE, not per step
+  gamma: 0.99
+  n_step: 96                     # n-step returns; half the 192-bar hold, so an
+                                 # entry's payoff reaches it without 96 hops
+  target_update_frequency: 500   # in gradient steps
+  train_frequency: 4             # gradient step every N env steps
+  learning_starts: 2000          # transitions collected before the first update
+  grad_clip: 10.0
+  prioritized: true
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_frames: 100000
+
+# Reward function
+#
+# log_return          - baseline: scaled log return of the portfolio.
+# differential_sharpe - Moody & Saffell (1998): online derivative of the Sharpe
+#                       ratio, so risk taken to earn a gain is priced in. The
+#                       log-return reward paid the same for a lucky gain as a
+#                       safe one, and the agent duly learned to take any profit
+#                       immediately.
+# cost_aware          - Zhang, Zohren & Roberts (2020) eq. 5: position-scaled
+#                       return minus an explicit turnover charge.
+reward:
+  mode: "differential_sharpe"
+  eta: 0.002              # adaptation rate, ~1/500 bars
+  warmup: 100
+  scale: 1.0
+  clip: 10.0
+  cost_bps: 15.0          # one-way cost used by cost_aware
+
+# Position sizing
+#
+# Volatility targeting (Zhang, Zohren & Roberts 2020; Moskowitz, Ooi & Pedersen
+# 2012): exposure = sigma_target / sigma_realized, so the strategy's own
+# volatility stays roughly constant instead of tracking the market's.
+sizing:
+  volatility_target: true
+  target_annual_volatility: 0.25
+  vol_span: 60            # bars in the ex-ante volatility estimate
+  min_scale: 0.0
+  levels: [0.0, 0.5, 1.0] # conviction levels the action space exposes
+  kelly_fraction: null    # optional fractional-Kelly cap on top
+  kelly_cap: 1.0
+  # Do not trade to chase a small change in target exposure. Without this,
+  # volatility scaling rebalances constantly and the churn costs more than the
+  # risk reduction is worth.
+  rebalance_deadband: 0.25
+
+# Q-network
 network:
   hidden_layers: [256, 128, 64]
   activation: "relu"
-  dropout_rate: 0.2
-  use_lstm: true
-  lstm_units: 50
-  use_attention: true
+  dropout_rate: 0.0
 
-# Feature Engineering
+# Feature engineering
+# Indicators are computed by features/technical_indicators.py and converted to
+# scale-free ratios by the environment. Volume indicators are skipped when the
+# dataset has no volume column (data/BTC.csv does not).
 features:
-  lookback_window: 60      # Number of previous time steps
   technical_indicators:
     - RSI
     - MACD
-    - BB          # Bollinger Bands
+    - BB
     - SMA_10
     - SMA_20
     - SMA_50
     - EMA_12
     - EMA_26
-    - STOCH       # Stochastic Oscillator
-    - ATR         # Average True Range
-  include_sentiment: true  # Fear & Greed Index
-  include_volume: true
-  normalize_features: true
+    - STOCH
+    - ATR
+  include_sentiment: true   # real Fear & Greed Index shipped with the dataset
 
-# Training Configuration
+# Training
 training:
-  episodes: 1000
-  max_steps_per_episode: 1000
+  episodes: 60
   validation_split: 0.2
-  early_stopping_patience: 50
-  save_best_model: true
-  log_frequency: 10
+  purge_bars: 60            # bars dropped between train and validation
+  log_frequency: 5
+  seed: 42
 
 # Backtesting
 backtesting:
-  start_date: "2020-01-01"
-  end_date: "2024-01-01"
-  benchmark: "BTC"         # Buy and hold Bitcoin
-  commission: 0.001
-  slippage: 0.0005
+  slippage: 0.0005          # 0.05% against the fill on entry and exit
+  walk_forward:
+    n_folds: 5
+    train_episodes: 8
+    purge_bars: 200         # ~2 days at 15m, covering the SMA_200 lookback
+    max_train_bars: 20000   # sliding cap; expanding windows are unaffordable at 15m
 
-# Risk Management
+# Risk management
+#
+# Stops are ATR multiples, frozen at entry, so one config works across
+# timeframes: a fixed 15% take-profit is reachable on 4h bars and weeks away on
+# 15m bars. At 15m the ATR is ~0.19% of price, putting the stop near 0.57% and
+# the target near 1.14% - both clear of the ~0.30% round-trip cost.
+#
+# min_hold_bars is the churn brake. The median 15m bar moves 0.08% while a round
+# trip costs 0.30%; only past ~24 bars (6h) does the median move exceed its own
+# cost. Without this the agent pays 96 spreads a day for nothing.
 risk:
-  max_drawdown_threshold: 0.20  # Stop trading if drawdown > 20%
-  var_confidence: 0.05          # 95% VaR
-  kelly_fraction: 0.25          # Kelly Criterion multiplier
-  stop_loss: 0.05               # 5% stop loss
-  take_profit: 0.15             # 15% take profit
+  max_drawdown_threshold: 0.35   # flatten and halt if equity falls 35% below peak
+  # The 15m run was stopped out 245 times against 59 targets: a 3x ATR stop
+  # (~0.57%) sits inside the range 15m noise covers routinely, so positions died
+  # of noise before any move developed. Widened, keeping the 2:1 payoff.
+  # Chosen by tools/sweep.py over 18 configurations on a validation window that
+  # ends before the walk-forward test region. A 3x ATR stop (~0.57%) sits inside
+  # the range 15m noise covers routinely; 10x survives it.
+  # Widened again for the 24h horizon: a day-long hold has to survive intraday
+  # noise that a 6h hold never sees.
+  stop_loss_atr: 16.0            # stop distance = 16 x ATR at entry
+  take_profit_atr: 32.0          # target distance = 32 x ATR at entry
+  min_stop_pct: 0.004            # floor, so a quiet ATR cannot stop inside the spread
+  max_stop_pct: 0.06             # ceiling, so a volatility spike cannot remove the stop
+  # 96 bars = 24h. The decile-extreme test showed the gross edge rising from
+  # +0.0089%/trade at 4 bars to +0.0772% at 96 - the only horizon that clears
+  # even maker costs.
+  # Sweep winner over 12 configurations (results/sweep.json): 192 bars = 48h.
+  # The longer the hold, the further the gross edge outgrows the round trip.
+  min_hold_bars: 192             # 48h at 15m: discretionary exits blocked until then
 
-# Data Sources
+# Live paper trading (live/ package, driven by live_trade.py)
+live:
+  symbol: "BTCUSD"
+  interval: "15m"
+  source: "auto"            # auto | binance | kraken | coinbase
+  poll_seconds: 60          # bars close four times an hour
+  state_dir: "results/live"
+
+# Online learning: periodic fine-tuning behind a promotion gate.
+# A challenger only replaces the live model if it beats it on bars that were
+# held out of its own fine-tuning. Without this gate, continual training on the
+# newest window degrades the model instead of improving it.
+online_learning:
+  enabled: true
+  bootstrap: true              # train an initial model if no checkpoint exists
+  bootstrap_episodes: 8
+  bootstrap_window_bars: 20000 # ~7 months of 15m bars for the initial fit
+
+  # Continuous half: one gradient step per closed bar on a shadow model.
+  per_bar_updates: true
+  gate_every_bars: 192         # two days, so the gate sees completed trades
+  shadow_warmup_bars: 500      # no promotion before the shadow has seen enough
+
+  # Slower half: a challenger trained from scratch on a recent window.
+  retrain_every_bars: 672      # 672 x 15m = one week of new data
+  train_window_bars: 5000      # ~52 days
+  eval_window_bars: 1000       # ~10 days, held out from the challenger's training
+  episodes: 8
+
+  metric: "sharpe_ratio"
+  min_improvement: 0.05
+
+# Data
 data:
-  primary_source: "yfinance"
-  symbols: ["BTC-USD"]
-  timeframe: "1d"           # Daily data
-  update_frequency: "daily"
+  path: "data/BTC_15m.csv"   # fetch with tools/fetch_history.py
+  symbol: "BTC-USD"
+  timeframe: "15m"
 
-# Dashboard Configuration
-dashboard:
-  port: 8501
-  theme: "dark"
-  refresh_interval: 30      # seconds
-  show_live_trades: true
-  show_performance_metrics: true
+# Funding-rate carry (delta-neutral basis trade)
+#
+# Long spot + short perpetual in equal notional. Price moves cancel between the
+# legs; the short leg collects funding every 8h. No price forecast is involved,
+# which is why this is the only strategy in the repo with a positive expected
+# return: the fee exists because leveraged longs pay for exposure.
+basis:
+  initial_capital: 10000
+  leverage: 3.0            # 3-5x is where this is run in practice
+  fee_per_leg: 0.0002      # maker on spot and perp
+  entry_threshold: 0.0     # trailing funding required to hold the position
+  exit_threshold: -0.00005 # trailing funding that forces an exit
+  lookback: 21             # intervals in the trailing average (one week)
+  maintenance_margin: 0.005
+
+# Multi-sleeve carry book (strategies/carry_book.py)
+#
+# Cross-sectional funding carry over N independent delta-neutral sleeves.
+# Positive funding is collected by a short perpetual; negative funding by the
+# mirror position. Harvesting both directions roughly tripled the return in
+# testing, because assets like APT paid -16%/yr that a one-directional book
+# could not touch.
+#
+# Leverage here is a fallback: carry_backtest.py solves it from a ruin budget
+# against the empirical distribution of adverse moves.
+carry_book:
+  initial_capital: 10000
+  leverage: 3.0
+  max_sleeves: 5
+  fee_per_leg: 0.0002
+  entry_threshold: 0.00002
+  exit_threshold: 0.0
+  lookback: 21
+  maintenance_margin: 0.005
+  allow_negative_funding: true
+  # 5x is the cliff edge measured by walk-forward: 3x returns 15.4%/yr, 5x
+  # returns 26.9% with zero liquidations, 8x takes one liquidation in fold 3 and
+  # ends at -18.2%. Leverage sized on historical tails does not protect against
+  # the tail that has not happened yet, so the cap is deliberately below what the
+  # ruin budget alone would permit.
+  max_leverage_cap: 5.0
+
+# Regime adaptation (strategies/regime.py)
+#
+# Measured on 2.4 years of hourly gold:
+#   autocorrelation of returns     -0.029 (1h)   -0.007 (24h)
+#   autocorrelation of volatility  +0.989 (1h)   +0.636 (24h)
+#
+# Direction is unforecastable; volatility is highly forecastable. So the bot
+# does not try to predict news - it measures the volatility already in progress
+# and shrinks exposure accordingly, stands aside for scheduled events, and
+# refuses a widened spread.
+# MEASURED RESULT: enabling this made hourly gold WORSE, and it ships off.
+#
+#                     no regime   regime+deadband
+#   Total return         27.26%             9.59%
+#   Sharpe                 1.43              0.59
+#   Max drawdown        -10.65%           -12.68%
+#   Deflated Sharpe        0.54              0.22
+#
+# The churn was fixed (624 -> 64 trades, profit factor 0.90 -> 1.41) and it
+# still lost. The likely reason: volatility scaling assumes high volatility is
+# danger, but in gold's bull run the high-volatility periods were where the
+# gains were. Cutting exposure there cut the winners.
+#
+# Kept because the mechanism is sound and may pay on a different asset or
+# regime - but it must be re-measured before being switched on, not assumed.
+regime:
+  enabled: false
+  vol_span: 48
+  vol_lookback: 500
+  calm_quantile: 0.33
+  stressed_quantile: 0.80
+  efficiency_window: 24
+  efficiency_threshold: 0.35
+  target_volatility: 0.15    # annualized; exposure scales to hold this constant
+  max_scale: 1.0
+  min_scale: 0.0
+  max_spread_multiple: 3.0   # refuse a spread this far above normal
+
+# Scheduled-event blackout (live/calendar.py)
+calendar:
+  enabled: true
+  before_minutes: 30
+  after_minutes: 30
+  impacts: ["High"]

@@ -1,226 +1,199 @@
 """
-Training Script for Bitcoin RL Trading Bot
-Main script to train the DQN agent on Bitcoin data
+Training script for the Bitcoin RL trading bot.
+
+Trains a DQN (or Double/Dueling variant) on a chronological slice of the data and
+evaluates it greedily on a held-out, purged validation slice.
+
+    python train_agent.py --data data/BTC.csv --episodes 60
 """
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
 import argparse
-import yaml
-from datetime import datetime
+import json
 import os
+import random
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
-from agents.dqn_agent import DQNAgent
+import numpy as np
+import pandas as pd
+import torch
+import yaml
+
+from agents.torch_dqn import DQNAgent
 from environment.trading_env import BitcoinTradingEnv
-from features.technical_indicators import add_technical_indicators
+from utils.data_utils import infer_periods_per_year, prepare_dataset, split_data
+from utils.metrics import print_performance_report
 
-def load_and_prepare_data(data_path: str) -> pd.DataFrame:
-    """Load and prepare Bitcoin data with technical indicators"""
-    print(f"Loading data from {data_path}...")
-    
-    # Load the data
-    df = pd.read_csv(data_path)
-    
-    # Convert timestamp to datetime if needed
-    if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df.set_index('timestamp', inplace=True)
-    
-    # Add technical indicators
-    print("Adding technical indicators...")
-    df = add_technical_indicators(df)
-    
-    # Remove rows with NaN values
-    df = df.dropna()
-    
-    print(f"Data prepared: {len(df)} rows, {len(df.columns)} columns")
-    return df
 
-def train_agent(data: pd.DataFrame, config_path: str = "config.yaml"):
-    """Train the DQN agent"""
-    
-    # Load configuration
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def load_config(config_path: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Read config.yaml and apply CLI overrides **in memory**.
+
+    The previous version wrote overrides back to config.yaml, silently mutating
+    a tracked file (and destroying its comments) on every run.
+    """
     with open(config_path, 'r') as file:
         config = yaml.safe_load(file)
-    
-    # Split data for training and validation
-    split_idx = int(len(data) * (1 - config['training']['validation_split']))
-    train_data = data.iloc[:split_idx]
-    val_data = data.iloc[split_idx:]
-    
-    print(f"Training data: {len(train_data)} rows")
-    print(f"Validation data: {len(val_data)} rows")
-    
-    # Create environment
-    env = BitcoinTradingEnv(train_data, config_path)
-    
-    # Initialize agent
-    state_size = len(env._get_observation())
-    action_size = env.action_space.n
-    agent = DQNAgent(state_size, action_size, config_path)
-    
-    print(f"State size: {state_size}")
-    print(f"Action size: {action_size}")
-    
-    # Training parameters
-    episodes = config['training']['episodes']
-    target_update_frequency = config['model']['target_update_frequency']
-    
-    # Training metrics
-    episode_rewards = []
-    episode_portfolio_values = []
-    episode_trades = []
-    
-    print(f"\nStarting training for {episodes} episodes...")
-    
-    for episode in range(episodes):
-        state = env.reset()
-        total_reward = 0
-        steps = 0
-        
-        while True:
-            # Choose action
-            action = agent.act(state)
-            
-            # Execute action
-            next_state, reward, done, info = env.step(action)
-            
-            # Store experience
-            agent.remember(state, action, reward, next_state, done)
-            
-            # Train agent
-            if len(agent.memory) > agent.batch_size:
-                agent.replay()
-            
-            state = next_state
-            total_reward += reward
-            steps += 1
-            
-            if done:
-                break
-        
-        # Update target network periodically
-        if episode % target_update_frequency == 0:
-            agent.update_target_network()
-        
-        # Record metrics
-        episode_rewards.append(total_reward)
-        episode_portfolio_values.append(info['portfolio_value'])
-        episode_trades.append(info['total_trades'])
-        
-        # Print progress
-        if episode % config['training']['log_frequency'] == 0:
-            avg_reward = np.mean(episode_rewards[-10:])
-            avg_portfolio = np.mean(episode_portfolio_values[-10:])
-            stats = agent.get_training_stats()
-            
-            print(f"Episode {episode:4d} | "
-                  f"Reward: {total_reward:8.4f} | "
-                  f"Avg Reward: {avg_reward:8.4f} | "
-                  f"Portfolio: ${avg_portfolio:8.2f} | "
-                  f"Epsilon: {stats['epsilon']:.4f} | "
-                  f"Trades: {info['total_trades']:3d}")
-    
-    # Save trained model
-    model_path = f"models/trained_models/dqn_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.h5"
-    os.makedirs(os.path.dirname(model_path), exist_ok=True)
-    agent.save_model(model_path)
-    
-    # Validation
-    print("\nRunning validation...")
-    val_env = BitcoinTradingEnv(val_data, config_path)
-    val_metrics = validate_agent(agent, val_env)
-    
-    print(f"\nValidation Results:")
-    for key, value in val_metrics.items():
-        print(f"{key}: {value:.4f}")
-    
-    # Plot training results
-    plot_training_results(episode_rewards, episode_portfolio_values, episode_trades)
-    
-    return agent, val_metrics
 
-def validate_agent(agent: DQNAgent, env: BitcoinTradingEnv):
-    """Validate the trained agent"""
-    state = env.reset()
-    total_reward = 0
-    
+    for section, values in (overrides or {}).items():
+        config.setdefault(section, {}).update(values)
+
+    return config
+
+
+def run_episode(agent: DQNAgent, env: BitcoinTradingEnv, training: bool = True,
+                seed: Optional[int] = None) -> Dict[str, Any]:
+    """Run one full pass over the environment's data."""
+    state, _ = env.reset(seed=seed)
+    total_reward = 0.0
+    steps = 0
+
     while True:
-        action = agent.act(state, training=False)  # No exploration
-        next_state, reward, done, info = env.step(action)
-        
+        action = agent.act(state, training=training)
+        next_state, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+
+        if training:
+            agent.remember(state, action, reward, next_state, done)
+            agent.replay()
+
         state = next_state
         total_reward += reward
-        
+        steps += 1
+
         if done:
             break
-    
-    # Get performance metrics
-    metrics = env.get_performance_metrics()
-    metrics['total_reward'] = total_reward
-    
-    return metrics
 
-def plot_training_results(rewards, portfolio_values, trades):
-    """Plot training results"""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-    
-    # Episode rewards
-    axes[0, 0].plot(rewards)
-    axes[0, 0].set_title('Episode Rewards')
-    axes[0, 0].set_xlabel('Episode')
-    axes[0, 0].set_ylabel('Total Reward')
-    
-    # Portfolio values
-    axes[0, 1].plot(portfolio_values)
-    axes[0, 1].set_title('Portfolio Value')
-    axes[0, 1].set_xlabel('Episode')
-    axes[0, 1].set_ylabel('Portfolio Value ($)')
-    
-    # Number of trades
-    axes[1, 0].plot(trades)
-    axes[1, 0].set_title('Number of Trades per Episode')
-    axes[1, 0].set_xlabel('Episode')
-    axes[1, 0].set_ylabel('Number of Trades')
-    
-    # Moving average of rewards
-    window = 50
-    if len(rewards) >= window:
-        moving_avg = pd.Series(rewards).rolling(window=window).mean()
-        axes[1, 1].plot(moving_avg)
-        axes[1, 1].set_title(f'Moving Average Reward (window={window})')
-        axes[1, 1].set_xlabel('Episode')
-        axes[1, 1].set_ylabel('Average Reward')
-    
-    plt.tight_layout()
-    plt.savefig('training_results.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    if training:
+        agent.decay_epsilon()
 
-def main():
-    parser = argparse.ArgumentParser(description='Train Bitcoin RL Trading Bot')
-    parser.add_argument('--data', type=str, required=True, help='Path to Bitcoin CSV data')
-    parser.add_argument('--config', type=str, default='config.yaml', help='Path to config file')
-    parser.add_argument('--episodes', type=int, help='Number of training episodes (overrides config)')
-    
+    return {
+        'total_reward': total_reward,
+        'steps': steps,
+        'portfolio_value': info['portfolio_value'],
+        'total_trades': info['total_trades'],
+        'win_rate': info['win_rate'],
+        'halted': info['halted'],
+    }
+
+
+def train(train_data: pd.DataFrame, config: Dict[str, Any],
+          val_data: Optional[pd.DataFrame] = None,
+          log_path: Optional[str] = None,
+          verbose: bool = True) -> Tuple[DQNAgent, List[Dict[str, Any]]]:
+    """Train an agent on ``train_data``; returns the agent and the per-episode log."""
+    seed = int(config['training'].get('seed', 42))
+    set_seed(seed)
+
+    env = BitcoinTradingEnv(train_data, config=config)
+    agent = DQNAgent(
+        state_size=env.n_features,
+        action_size=env.n_actions,
+        config=config,
+        seed=seed,
+        feature_names=env.feature_names + env._portfolio_features(),
+    )
+
+    episodes = int(config['training']['episodes'])
+    log_frequency = int(config['training'].get('log_frequency', 5))
+    history: List[Dict[str, Any]] = []
+
+    if verbose:
+        print(f"\nTraining {agent.variant} agent: {episodes} episodes, "
+              f"{len(train_data)} bars, {env.n_features} features")
+
+    for episode in range(1, episodes + 1):
+        result = run_episode(agent, env, training=True, seed=seed + episode)
+        stats = agent.get_training_stats()
+        record = {'episode': episode, **result, **stats}
+        history.append(record)
+
+        if verbose and (episode % log_frequency == 0 or episode == 1):
+            print(f"Episode {episode:4d} | reward {result['total_reward']:9.2f} "
+                  f"| equity ${result['portfolio_value']:10,.2f} "
+                  f"| trades {result['total_trades']:4d} "
+                  f"| win {result['win_rate']:5.1%} "
+                  f"| eps {stats['epsilon']:.3f} "
+                  f"| loss {stats['avg_loss']:.4f}")
+
+    if log_path:
+        os.makedirs(os.path.dirname(log_path) or '.', exist_ok=True)
+        pd.DataFrame(history).to_csv(log_path, index=False)
+        if verbose:
+            print(f"Training log written to {log_path}")
+
+    if val_data is not None and len(val_data) > 1 and verbose:
+        val_env = BitcoinTradingEnv(val_data, config=config)
+        run_episode(agent, val_env, training=False)
+        metrics = val_env.get_performance_metrics()
+        print_performance_report(metrics, title="VALIDATION (greedy, out-of-sample)")
+
+    return agent, history
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description='Train the Bitcoin RL trading bot')
+    parser.add_argument('--data', type=str, default='data/BTC.csv', help='Path to OHLC CSV')
+    parser.add_argument('--config', type=str, default='config.yaml')
+    parser.add_argument('--episodes', type=int, help='Override training.episodes')
+    parser.add_argument('--variant', type=str, choices=['dqn', 'double', 'dueling'],
+                        help='Override model.variant')
+    parser.add_argument('--seed', type=int, help='Override training.seed')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Checkpoint path (default: models/trained_models/<variant>_<ts>.pt)')
     args = parser.parse_args()
-    
-    # Load and prepare data
-    data = load_and_prepare_data(args.data)
-    
-    # Override episodes if specified
+
+    overrides: Dict[str, Dict[str, Any]] = {}
     if args.episodes:
-        with open(args.config, 'r') as file:
-            config = yaml.safe_load(file)
-        config['training']['episodes'] = args.episodes
-        with open(args.config, 'w') as file:
-            yaml.dump(config, file)
-    
-    # Train agent
-    agent, metrics = train_agent(data, args.config)
-    
-    print("\nTraining completed successfully!")
-    print(f"Final validation metrics: {metrics}")
+        overrides.setdefault('training', {})['episodes'] = args.episodes
+    if args.seed is not None:
+        overrides.setdefault('training', {})['seed'] = args.seed
+    if args.variant:
+        overrides.setdefault('model', {})['variant'] = args.variant
+
+    config = load_config(args.config, overrides)
+
+    data = prepare_dataset(args.data)
+    print(f"Bars: {len(data)} | {data.index[0]} -> {data.index[-1]} "
+          f"| {infer_periods_per_year(data.index):.0f} periods/year")
+
+    train_data, val_data = split_data(
+        data,
+        train_fraction=1 - float(config['training']['validation_split']),
+        purge=int(config['training'].get('purge_bars', 0)),
+    )
+    print(f"Train: {len(train_data)} bars ({train_data.index[0]} -> {train_data.index[-1]})")
+    print(f"Validation: {len(val_data)} bars ({val_data.index[0]} -> {val_data.index[-1]})")
+
+    agent, history = train(train_data, config, val_data=val_data,
+                           log_path='results/training_log.csv')
+
+    output = args.output or (
+        f"models/trained_models/{agent.variant}_"
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
+    )
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+    agent.save_model(output)
+
+    os.makedirs('results', exist_ok=True)
+    with open('results/training_summary.json', 'w') as file:
+        json.dump({
+            'checkpoint': output,
+            'variant': agent.variant,
+            'episodes': len(history),
+            'train_range': [str(train_data.index[0]), str(train_data.index[-1])],
+            'validation_range': [str(val_data.index[0]), str(val_data.index[-1])],
+            'final_epsilon': agent.epsilon,
+        }, file, indent=2)
+
+    print("\nTraining complete.")
+
 
 if __name__ == "__main__":
     main()
