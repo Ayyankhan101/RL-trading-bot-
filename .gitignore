@@ -11,6 +11,7 @@ dashboard/dist/
 dashboard/public/results/
 
 # Run artifacts
+logs/
 results/
 models/trained_models/
 *.pt

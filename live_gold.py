@@ -27,6 +27,26 @@ from live.gold_trader import GoldLiveTrader
 from strategies.account_sizing import account_table, format_account_table
 
 
+def _bar_age(status: dict) -> str:
+    """
+    How long since the last processed bar.
+
+    The silent failure mode is a process that is alive but has not advanced in
+    days - a changed Yahoo response, a dead symbol. Uptime does not show it;
+    this does. Gold closes at weekends, so nothing is flagged until ~65 hours,
+    or every Monday morning would look like an outage.
+    """
+    import pandas as pd
+
+    last = status.get('last_bar')
+    if not last:
+        return 'no bars processed yet'
+
+    age_hours = (pd.Timestamp.now() - pd.Timestamp(last)).total_seconds() / 3600
+    flag = '  <-- STALE' if age_hours > 65 else ''
+    return f"{age_hours:.1f}h{flag}"
+
+
 def print_status(status: dict) -> None:
     learning = status.get('online_learning', {})
     per_bar = learning.get('per_bar') or {}
@@ -52,6 +72,7 @@ def print_status(status: dict) -> None:
          if event else "none scheduled"),
         ("Learning", f"{per_bar.get('gradient_updates', 0)} updates, "
                      f"{learning.get('promotions', 0)} promotions"),
+        ("Bar age", _bar_age(status)),
     ]
 
     print("\nGOLD - LIVE PAPER ACCOUNT")

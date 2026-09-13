@@ -277,3 +277,35 @@ def test_gold_trader_blocks_entries_during_an_event(config):
     assert trader.entry_blocked(pd.Timestamp('2026-09-16 14:00'))['title'] == 'FOMC Statement'
     assert trader.entry_blocked(pd.Timestamp('2026-09-16 16:00')) is None
     assert trader.blocked_entries == 1
+
+
+def test_next_bar_message_does_not_point_into_the_past():
+    """
+    Gold closes at weekends. Projecting the next bar from the last one then runs
+    into the past, and an idle log line saying 'next due' at a time already gone
+    reads like a broken clock rather than a shut market.
+    """
+    import copy
+
+    from live.trader import LiveTrader
+
+    frame = pd.DataFrame(
+        {'close': [1.0, 2.0]},
+        index=pd.to_datetime(['2020-01-01 00:00', '2020-01-01 01:00']))
+
+    trader = LiveTrader.__new__(LiveTrader)
+    trader.interval = '1h'
+
+    assert trader._next_bar_due(frame) == 'market closed - awaiting next session'
+
+
+def test_next_bar_message_is_a_timestamp_when_the_market_is_open():
+    from live.trader import LiveTrader
+
+    now = pd.Timestamp.now()
+    frame = pd.DataFrame({'close': [1.0]}, index=pd.DatetimeIndex([now]))
+
+    trader = LiveTrader.__new__(LiveTrader)
+    trader.interval = '1h'
+
+    assert 'market closed' not in trader._next_bar_due(frame)

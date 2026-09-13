@@ -572,7 +572,20 @@ ones that caught real bugs:
 - **Data:** pandas, NumPy
 - **Config:** PyYAML
 - **Tests:** pytest
-- **Dashboard:** Vite, React, TypeScript, Recharts
+- **Run it unattended (macOS, launchd) so a forward record actually accumulates:
+
+```bash
+./scripts/goldbot.sh install   # starts on login, restarts on crash
+./scripts/goldbot.sh status    # launchd state AND the account itself
+./scripts/goldbot.sh logs      # follow it
+./scripts/goldbot.sh uninstall # fully reverses the install
+```
+
+Sleeping the machine is harmless: the bot replays every bar that closed while it
+was away, because `process_new_bars` resumes from the last bar it recorded. A
+missed hour costs nothing; a missed *bar* would, and cannot happen.
+
+Dashboard:** Vite, React, TypeScript, Recharts
 - **Data sources:** Binance (spot, perpetuals, funding), Yahoo Finance (COMEX
   gold), alternative.me (Fear & Greed), ForexFactory (economic calendar)
 

@@ -369,9 +369,19 @@ class LiveTrader:
         frame.to_csv(path, mode='a', header=header, index=False)
 
     def _next_bar_due(self, data: pd.DataFrame) -> str:
-        """When the next bar closes, so an idle log line is legible."""
+        """
+        When the next bar is expected, so an idle log line is legible.
+
+        For instruments that close (gold at weekends) the projection runs into
+        the past, which reads like a broken clock. Say the market is shut
+        instead.
+        """
         step = pd.Timedelta(INTERVALS[self.interval]['pandas'])
-        return str(data.index[-1] + 2 * step)
+        due = data.index[-1] + 2 * step
+
+        if due < pd.Timestamp.now():
+            return 'market closed - awaiting next session'
+        return str(due)
 
     def _write_status(self, data: pd.DataFrame, price: float, new_bars: int,
                       promotion: Optional[Dict[str, Any]],

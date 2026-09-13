@@ -30,6 +30,10 @@ CACHE_DIR = 'data/live'
 # Yahoo caps intraday history by interval.
 MAX_RANGE = {'5m': '60d', '15m': '60d', '30m': '60d', '1h': '730d', '1d': '10y'}
 
+# Gold's intervals, for code that needs the pandas offset alias.
+INTERVALS = {k: {'pandas': k.replace('m', 'min') if k.endswith('m') else k}
+             for k in MAX_RANGE}
+
 
 class GoldFeedError(RuntimeError):
     """Raised when gold bars cannot be fetched."""

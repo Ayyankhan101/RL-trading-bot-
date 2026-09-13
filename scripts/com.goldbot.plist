@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.goldbot.live</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO__/scripts/run_live_gold.sh</string>
+    </array>
+
+    <!-- launchd starts a job in / unless told otherwise, and the bot resolves
+         results/ and data/ relative to the repo. -->
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on a crash, but not after a clean exit: otherwise a deliberate
+         stop turns into a restart loop. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Back off rather than hammering Yahoo if it is failing to start. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/logs/launchd.err.log</string>
+
+    <!-- Not an interactive job; it should yield to anything the user is doing. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>GOLDBOT_POLL</key>
+        <string>900</string>
+    </dict>
+</dict>
+</plist>
