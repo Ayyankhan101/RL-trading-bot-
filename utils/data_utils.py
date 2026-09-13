@@ -1,285 +1,207 @@
 """
-Data handling utilities for the RL Trading Bot
+Data handling utilities for the RL Trading Bot.
+
+Loading is deliberately strict: the environment walks the dataframe forwards in
+time, so a file that is sorted newest-first (as data/BTC.csv is on disk) must be
+reordered before anything else touches it.
 """
 
-import pandas as pd
-import numpy as np
-import yfinance as yf
-from datetime import datetime, timedelta
-from typing import Optional, Tuple
 import os
+from typing import Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+FEAR_GREED_COLUMN = 'Fear & Greed Index'
 
 
-def download_bitcoin_data(symbol: str = "BTC-USD", 
-                         period: str = "5y", 
-                         interval: str = "1d") -> pd.DataFrame:
+def download_bitcoin_data(symbol: str = "BTC-USD",
+                          period: str = "5y",
+                          interval: str = "1d") -> pd.DataFrame:
     """
-    Download Bitcoin data from Yahoo Finance
-    
-    Args:
-        symbol: Trading symbol (default: BTC-USD)
-        period: Data period (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
-        interval: Data interval (1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo)
-    
-    Returns:
-        DataFrame with OHLCV data
+    Download OHLCV data from Yahoo Finance.
+
+    yfinance is imported lazily so that the rest of this module - and therefore
+    the whole training/backtesting pipeline - works without it installed.
     """
     try:
-        ticker = yf.Ticker(symbol)
-        data = ticker.history(period=period, interval=interval)
-        
-        # Clean column names
-        data.columns = [col.lower() for col in data.columns]
-        
-        # Reset index to make timestamp a column
-        data.reset_index(inplace=True)
-        # Handle both 'Date' and 'date' column names from yfinance
-        if 'Date' in data.columns:
-            data.rename(columns={'Date': 'timestamp'}, inplace=True)
-        elif 'date' in data.columns:
-            data.rename(columns={'date': 'timestamp'}, inplace=True)
-        
-        print(f"Downloaded {len(data)} rows of {symbol} data")
-        return data
-        
-    except Exception as e:
-        print(f"Error downloading data: {e}")
-        return pd.DataFrame()
+        import yfinance as yf
+    except ImportError as exc:
+        raise ImportError(
+            "yfinance is required for download_bitcoin_data(). "
+            "Install it with: pip install yfinance"
+        ) from exc
+
+    ticker = yf.Ticker(symbol)
+    data = ticker.history(period=period, interval=interval)
+    if data.empty:
+        raise ValueError(f"No data returned for {symbol} (period={period}, interval={interval})")
+
+    data.columns = [str(col).lower() for col in data.columns]
+    data.reset_index(inplace=True)
+    for candidate in ('Date', 'date', 'Datetime', 'datetime', 'index'):
+        if candidate in data.columns:
+            data.rename(columns={candidate: 'timestamp'}, inplace=True)
+            break
+
+    data['timestamp'] = pd.to_datetime(data['timestamp'], utc=True).dt.tz_localize(None)
+    data = data.sort_values('timestamp').set_index('timestamp')
+    print(f"Downloaded {len(data)} rows of {symbol} data")
+    return data
 
 
 def load_data(file_path: str) -> pd.DataFrame:
     """
-    Load data from CSV file
-    
-    Args:
-        file_path: Path to CSV file
-        
-    Returns:
-        DataFrame with loaded data
-    """
-    try:
-        data = pd.read_csv(file_path)
-        
-        # Convert timestamp column if it exists
-        if 'timestamp' in data.columns:
-            data['timestamp'] = pd.to_datetime(data['timestamp'])
-        elif 'date' in data.columns:
-            data['date'] = pd.to_datetime(data['date'])
-            data.rename(columns={'date': 'timestamp'}, inplace=True)
-            
-        print(f"Loaded {len(data)} rows from {file_path}")
-        return data
-        
-    except Exception as e:
-        print(f"Error loading data: {e}")
-        return pd.DataFrame()
+    Load an OHLC(V) CSV into a chronologically-sorted, DatetimeIndex-ed frame.
 
+    Raises rather than returning an empty frame: silently continuing with no data
+    is how a backtest ends up reporting numbers for a run that never happened.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Data file not found: {file_path}")
 
-def save_data(data: pd.DataFrame, file_path: str) -> bool:
-    """
-    Save DataFrame to CSV file
-    
-    Args:
-        data: DataFrame to save
-        file_path: Output file path
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        
-        data.to_csv(file_path, index=False)
-        print(f"Saved {len(data)} rows to {file_path}")
-        return True
-        
-    except Exception as e:
-        print(f"Error saving data: {e}")
-        return False
+    data = pd.read_csv(file_path)
 
+    if 'timestamp' not in data.columns:
+        raise KeyError(f"{file_path} has no 'timestamp' column (found: {list(data.columns)})")
 
-def split_data(data: pd.DataFrame, 
-               train_ratio: float = 0.7, 
-               val_ratio: float = 0.15) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Split data into train, validation, and test sets
-    
-    Args:
-        data: Input DataFrame
-        train_ratio: Ratio for training data
-        val_ratio: Ratio for validation data
-        
-    Returns:
-        Tuple of (train_data, val_data, test_data)
-    """
-    n = len(data)
-    train_end = int(n * train_ratio)
-    val_end = int(n * (train_ratio + val_ratio))
-    
-    train_data = data.iloc[:train_end].copy()
-    val_data = data.iloc[train_end:val_end].copy()
-    test_data = data.iloc[val_end:].copy()
-    
-    print(f"Data split - Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
-    
-    return train_data, val_data, test_data
+    data['timestamp'] = pd.to_datetime(data['timestamp'])
+    data = (data
+            .drop_duplicates(subset='timestamp', keep='last')
+            .sort_values('timestamp')
+            .set_index('timestamp'))
 
+    missing = {'open', 'high', 'low', 'close'} - set(data.columns)
+    if missing:
+        raise KeyError(f"{file_path} is missing OHLC columns: {sorted(missing)}")
 
-def normalize_features(data: pd.DataFrame, 
-                      feature_columns: list, 
-                      method: str = 'minmax') -> pd.DataFrame:
-    """
-    Normalize feature columns
-    
-    Args:
-        data: Input DataFrame
-        feature_columns: List of columns to normalize
-        method: Normalization method ('minmax', 'zscore')
-        
-    Returns:
-        DataFrame with normalized features
-    """
-    normalized_data = data.copy()
-    
-    for col in feature_columns:
-        if col in data.columns:
-            if method == 'minmax':
-                min_val = data[col].min()
-                max_val = data[col].max()
-                normalized_data[col] = (data[col] - min_val) / (max_val - min_val + 1e-8)
-            elif method == 'zscore':
-                mean_val = data[col].mean()
-                std_val = data[col].std()
-                normalized_data[col] = (data[col] - mean_val) / (std_val + 1e-8)
-    
-    return normalized_data
+    if not data.index.is_monotonic_increasing:
+        raise ValueError("Data index is not monotonically increasing after sorting")
 
-
-def add_fear_greed_index(data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add Fear & Greed Index (simulated for demo purposes)
-    In production, this would fetch real data from an API
-    
-    Args:
-        data: Input DataFrame
-        
-    Returns:
-        DataFrame with Fear & Greed Index
-    """
-    # Simulate Fear & Greed Index based on price volatility and momentum
-    data = data.copy()
-    
-    # Calculate price momentum and volatility
-    data['price_change'] = data['close'].pct_change(periods=7)
-    data['volatility'] = data['close'].rolling(window=14).std()
-    
-    # Normalize to 0-100 scale (inverted for fear/greed)
-    price_momentum_norm = (data['price_change'] - data['price_change'].mean()) / data['price_change'].std()
-    volatility_norm = (data['volatility'] - data['volatility'].mean()) / data['volatility'].std()
-    
-    # Combine factors (higher values = more greed, lower = more fear)
-    fear_greed_raw = 50 + (price_momentum_norm * 20) - (volatility_norm * 15)
-    
-    # Clip to 0-100 range
-    data['Fear & Greed Index'] = np.clip(fear_greed_raw, 0, 100)
-    
-    # Clean up temporary columns
-    data.drop(['price_change', 'volatility'], axis=1, inplace=True)
-    
+    print(f"Loaded {len(data)} rows from {file_path} "
+          f"({data.index[0]} -> {data.index[-1]})")
     return data
 
 
-def validate_data(data: pd.DataFrame) -> dict:
+def infer_periods_per_year(index: pd.DatetimeIndex) -> float:
     """
-    Validate data quality and return statistics
-    
-    Args:
-        data: Input DataFrame
-        
-    Returns:
-        Dictionary with validation results
+    Periods per year implied by the median spacing of ``index``.
+
+    Annualization factors must come from the data. The previous code hardcoded
+    252 (daily) while the bundled dataset is 4-hourly, overstating every
+    annualized figure by roughly 2.9x.
     """
-    validation_results = {
-        'total_rows': len(data),
-        'missing_values': data.isnull().sum().to_dict(),
-        'duplicate_rows': data.duplicated().sum(),
-        'date_range': None,
-        'data_quality_score': 0
-    }
-    
-    # Check date range
-    if 'timestamp' in data.columns:
-        validation_results['date_range'] = {
-            'start': data['timestamp'].min(),
-            'end': data['timestamp'].max(),
-            'days': (data['timestamp'].max() - data['timestamp'].min()).days
-        }
-    
-    # Calculate data quality score (0-100)
-    total_cells = len(data) * len(data.columns)
-    missing_cells = data.isnull().sum().sum()
-    duplicate_penalty = validation_results['duplicate_rows'] * len(data.columns)
-    
-    quality_score = max(0, 100 - (missing_cells / total_cells * 100) - (duplicate_penalty / total_cells * 100))
-    validation_results['data_quality_score'] = round(quality_score, 2)
-    
-    return validation_results
+    if len(index) < 3:
+        return 365.0
+
+    median_delta = pd.Series(index).diff().median()
+    seconds = median_delta.total_seconds()
+    if not seconds or seconds <= 0:
+        return 365.0
+
+    # Crypto trades continuously: 365 calendar days, not 252 trading days.
+    return (365.0 * 24 * 60 * 60) / seconds
 
 
-def create_sample_data() -> pd.DataFrame:
+def save_data(data: pd.DataFrame, file_path: str) -> None:
+    """Write a dataframe to CSV, creating parent directories when needed."""
+    directory = os.path.dirname(file_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    data.to_csv(file_path)
+    print(f"Saved {len(data)} rows to {file_path}")
+
+
+def split_data(data: pd.DataFrame, train_fraction: float = 0.8,
+               purge: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Create sample Bitcoin data for testing purposes
-    
-    Returns:
-        DataFrame with sample OHLCV data
+    Chronological train/test split with an optional purge gap.
+
+    The gap drops ``purge`` bars between the two sets so that no indicator
+    lookback window straddles the boundary and leaks train data into test.
     """
-    # Generate 2 years of daily data
-    dates = pd.date_range(start='2022-01-01', end='2024-01-01', freq='D')
-    n_days = len(dates)
-    
-    # Simulate Bitcoin price with trend and volatility
-    np.random.seed(42)
-    
-    # Starting price
-    initial_price = 40000
-    
-    # Generate price series with random walk + trend
-    returns = np.random.normal(0.001, 0.03, n_days)  # Daily returns
-    prices = [initial_price]
-    
-    for i in range(1, n_days):
-        new_price = prices[-1] * (1 + returns[i])
-        prices.append(max(new_price, 1000))  # Minimum price floor
-    
-    # Create OHLCV data
-    data = pd.DataFrame({
-        'timestamp': dates,
-        'open': prices,
-        'high': [p * (1 + abs(np.random.normal(0, 0.02))) for p in prices],
-        'low': [p * (1 - abs(np.random.normal(0, 0.02))) for p in prices],
-        'close': prices,
-        'volume': np.random.lognormal(15, 1, n_days)  # Log-normal volume distribution
-    })
-    
-    # Ensure high >= close >= low and high >= open >= low
-    for i in range(len(data)):
-        high = max(data.loc[i, 'open'], data.loc[i, 'close'], data.loc[i, 'high'])
-        low = min(data.loc[i, 'open'], data.loc[i, 'close'], data.loc[i, 'low'])
-        data.loc[i, 'high'] = high
-        data.loc[i, 'low'] = low
-    
+    if not 0 < train_fraction < 1:
+        raise ValueError(f"train_fraction must be in (0, 1), got {train_fraction}")
+
+    split_idx = int(len(data) * train_fraction)
+    train = data.iloc[:split_idx]
+    test = data.iloc[split_idx + purge:]
+    return train, test
+
+
+def normalize_causal(series: pd.Series, window: int = 200) -> pd.Series:
+    """
+    Rolling z-score using only past observations.
+
+    Deliberately rolling rather than whole-series: normalizing by the full
+    dataframe's mean and standard deviation - as the previous implementation
+    did - leaks future information into every historical row.
+    """
+    mean = series.rolling(window=window, min_periods=window).mean()
+    std = series.rolling(window=window, min_periods=window).std(ddof=0)
+    return (series - mean) / std.replace(0, np.nan)
+
+
+def ensure_fear_greed(data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Guarantee a usable Fear & Greed column.
+
+    data/BTC.csv ships the real index, so the normal path is a forward-fill of
+    the handful of missing readings. When the column is absent entirely the
+    column is filled with the neutral value 50 - a flat constant that carries no
+    information, rather than a synthetic index derived from the price series,
+    which would masquerade as sentiment while being a function of the very
+    prices the agent already observes.
+    """
+    out = data.copy()
+
+    if FEAR_GREED_COLUMN in out.columns:
+        out[FEAR_GREED_COLUMN] = (out[FEAR_GREED_COLUMN]
+                                  .ffill()
+                                  .fillna(50.0)
+                                  .astype(float)
+                                  .clip(0, 100))
+    else:
+        out[FEAR_GREED_COLUMN] = 50.0
+
+    return out
+
+
+def validate_data(data: pd.DataFrame) -> None:
+    """Raise on the data defects that would silently corrupt a backtest."""
+    problems = []
+
+    if data.empty:
+        problems.append("dataframe is empty")
+    if not isinstance(data.index, pd.DatetimeIndex):
+        problems.append("index is not a DatetimeIndex")
+    elif not data.index.is_monotonic_increasing:
+        problems.append("index is not sorted ascending")
+
+    for col in ('open', 'high', 'low', 'close'):
+        if col not in data.columns:
+            problems.append(f"missing column '{col}'")
+        elif (data[col] <= 0).any():
+            problems.append(f"column '{col}' contains non-positive prices")
+
+    if {'high', 'low'} <= set(data.columns) and (data['high'] < data['low']).any():
+        problems.append("high < low on at least one bar")
+
+    if problems:
+        raise ValueError("Invalid market data: " + "; ".join(problems))
+
+
+def prepare_dataset(file_path: str, add_indicators: bool = True) -> pd.DataFrame:
+    """Load, validate, enrich and clean a dataset in one call."""
+    from features.technical_indicators import add_technical_indicators
+
+    data = load_data(file_path)
+    validate_data(data)
+    data = ensure_fear_greed(data)
+
+    if add_indicators:
+        data = add_technical_indicators(data)
+        data = data.dropna(subset=[c for c in data.columns if c != 'Fear & Greed Classification'])
+
+    print(f"Prepared dataset: {len(data)} rows, {len(data.columns)} columns")
     return data
-
-
-if __name__ == "__main__":
-    # Example usage
-    print("Creating sample Bitcoin data...")
-    sample_data = create_sample_data()
-    
-    print("\nValidating data...")
-    validation = validate_data(sample_data)
-    print(f"Data quality score: {validation['data_quality_score']}")
-    
-    print("\nSaving sample data...")
-    save_data(sample_data, "data/sample_btc_data.csv")

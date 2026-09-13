@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Node / dashboard
+node_modules/
+dashboard/dist/
+dashboard/public/results/
+
+# Run artifacts
+results/
+models/trained_models/
+*.pt
+
+# Fetched market data. All of it is reproducible from tools/fetch_*.py, and
+# committing ~15MB of CSVs that go stale within days bloats every clone.
+# data/BTC.csv is the exception: it ships with the repo as a fixed reference
+# series the tests run against.
+data/live/
+data/BTC_15m.csv
+data/BTC_basis.csv
+data/GOLD_*.csv
+data/perp_funding.csv
+.DS_Store
+.pytest_cache/
