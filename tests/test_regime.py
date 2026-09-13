@@ -309,3 +309,21 @@ def test_next_bar_message_is_a_timestamp_when_the_market_is_open():
     trader.interval = '1h'
 
     assert 'market closed' not in trader._next_bar_due(frame)
+
+
+def test_goldbot_stop_unloads_rather_than_signalling():
+    """
+    `launchctl stop` only sends SIGTERM, and KeepAlive then restarts the job -
+    so stop reported success while the bot kept running. Only unloading removes
+    it from launchd, which is the only way a stop stays stopped.
+    """
+    import pathlib
+
+    script = pathlib.Path('scripts/goldbot.sh').read_text()
+
+    stop_block = script.split('  stop)')[1].split(';;')[0]
+    assert 'launchctl unload' in stop_block
+    assert 'launchctl stop' not in stop_block
+
+    start_block = script.split('  start)')[1].split(';;')[0]
+    assert 'launchctl load' in start_block

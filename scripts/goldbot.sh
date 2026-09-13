@@ -46,10 +46,35 @@ case "${1:-}" in
     echo "the paper account in results/live_gold/ is left untouched"
     ;;
 
-  start)   launchctl start "$LABEL" && echo "started $LABEL" ;;
-  stop)    launchctl stop  "$LABEL" && echo "stopped $LABEL" ;;
-  restart) launchctl stop  "$LABEL" 2>/dev/null; sleep 2
-           launchctl start "$LABEL" && echo "restarted $LABEL" ;;
+  # stop/start unload and load rather than using `launchctl stop`/`start`.
+  #
+  # `launchctl stop` only sends SIGTERM. KeepAlive then sees a non-clean exit
+  # and immediately restarts the job, so `stop` reported success while the bot
+  # kept running. Unloading removes the job from launchd entirely, which is the
+  # only way to make a stop stay stopped.
+  start)
+    [[ -f "$AGENT" ]] || { echo "not installed - run: $0 install" >&2; exit 1; }
+    launchctl load "$AGENT" 2>/dev/null
+    sleep 1
+    if launchctl list | grep -q "$LABEL"; then echo "started $LABEL"
+    else echo "failed to start; see logs/launchd.err.log" >&2; exit 1; fi
+    ;;
+
+  stop)
+    launchctl unload "$AGENT" 2>/dev/null
+    sleep 2
+    if pgrep -f 'live_gold.py --poll' >/dev/null; then
+      echo "still running after unload; check: pgrep -fl live_gold.py" >&2
+      exit 1
+    fi
+    echo "stopped $LABEL (stays stopped until 'start')"
+    ;;
+
+  restart)
+    launchctl unload "$AGENT" 2>/dev/null
+    sleep 2
+    launchctl load "$AGENT" && echo "restarted $LABEL"
+    ;;
 
   status)
     echo "=== launchd ==="
